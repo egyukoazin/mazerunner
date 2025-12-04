@@ -1,0 +1,357 @@
+<!--
+TileBox — single-file minimal tile-based 2D game
+- World: 1,000 square blocks (40 x 25 tiles)
+- Controls:
+    W = up / forward
+    S = down / back
+    A = left
+    D = right
+    SPACE = jump
+    Double-tap W ("ww") within 250 ms = sprint
+    Mouse click = toggle debug grid
+- Features: camera, simple physics, collisions with solid tiles and box boundary, mini-map, HUD
+- How to use:
+    1. Save this file as index.html
+    2. Open in a modern browser (Chrome/Edge/Firefox). No server required.
+    3. To publish on GitHub: create a repo, add this file as index.html and enable GitHub Pages (or push to gh-pages branch).
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TileBox — 1000-block Closed World</title>
+  <style>
+    :root{--bg:#0b1020;--tile:#1b2b40;--tile2:#20364a;--player:#ffd166;--accent:#06d6a0}
+    html,body{height:100%;margin:0;background:var(--bg);color:#e6eef8;font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
+    .wrap{display:flex;gap:12px;padding:12px}
+    canvas{background:linear-gradient(180deg,#081022 0%, #0b1530 100%);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,0.6);}
+    .panel{width:320px}
+    h1{margin:0 0 8px 0;font-size:18px}
+    p.small{font-size:13px;color:#9fb0d6}
+    .controls{background:rgba(255,255,255,0.03);padding:10px;border-radius:6px}
+    .btn{display:inline-block;padding:8px 10px;border-radius:6px;background:#0f2740;color:#dff7ee;margin-top:8px;text-decoration:none}
+    .footer{font-size:12px;color:#9fb0d6;margin-top:12px}
+    .hud{position:absolute;left:20px;top:18px;color:#dff7ee;font-weight:600}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div style="position:relative;flex:1">
+      <div class="hud" id="hud">Loading...</div>
+      <canvas id="game" width="960" height="600"></canvas>
+    </div>
+
+    <aside class="panel">
+      <h1>TileBox — 1000-block closed world</h1>
+      <div class="controls">
+        <p class="small">Move: W A S D · Jump: SPACE · Double-tap W for sprint ("ww") · Click canvas to toggle grid</p>
+        <div style="margin-top:8px">
+          <a class="btn" id="resetBtn">Reset Player</a>
+        </div>
+      </div>
+
+      <div style="margin-top:12px">
+        <h3 style="margin:8px 0 6px 0">About</h3>
+        <p class="small">This demo uses a tilemap of 40×25 = 1000 tiles. Some tiles are solid; boundaries are closed. It implements collision, gravity, jump, walking, sprinting (double-tap W) and a small minimap.</p>
+      </div>
+
+      <div style="margin-top:12px" class="footer">
+        <div>How to publish on GitHub:</div>
+        <ol style="padding-left:18px;margin:6px 0 0 0">
+          <li>git init · git add index.html · git commit -m "Initial"</li>
+          <li>Create repo on GitHub and push</li>
+          <li>Enable GitHub Pages (main branch) to serve index.html</li>
+        </ol>
+      </div>
+    </aside>
+  </div>
+
+<script>
+// TileBox — configuration
+const TILE_SIZE = 24;           // px
+const MAP_W = 40;              // tiles -> 40 * 25 = 1000 tiles
+const MAP_H = 25;
+const WORLD_W = MAP_W * TILE_SIZE;
+const WORLD_H = MAP_H * TILE_SIZE;
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let gridOn = true;
+
+// Camera
+const camera = { x: 0, y: 0, w: canvas.width, h: canvas.height };
+
+// Create a simple tilemap: 0 = empty, 1 = solid
+const map = new Uint8Array(MAP_W * MAP_H);
+function idx(x,y){return y*MAP_W + x}
+
+// Populate: surround with walls, add some random blocks
+for(let y=0;y<MAP_H;y++){
+  for(let x=0;x<MAP_W;x++){
+    if(x==0||y==0||x==MAP_W-1||y==MAP_H-1) map[idx(x,y)] = 1; // border
+    else map[idx(x,y)] = 0;
+  }
+}
+
+// Add some platform shapes to play on
+function addRect(tx,ty,tw,th){
+  for(let y=ty;y<ty+th;y++) for(let x=tx;x<tx+tw;x++) if(x>0&&x<MAP_W-1&&y>0&&y<MAP_H-1) map[idx(x,y)] = 1;
+}
+addRect(4, MAP_H-3, 10, 1);
+addRect(18, MAP_H-6, 8, 1);
+addRect(28, MAP_H-9, 6, 1);
+addRect(12, MAP_H-13, 12, 1);
+addRect(2, MAP_H-8, 4, 1);
+addRect(34, MAP_H-14, 4, 1);
+
+// Player
+const player = {
+  x: TILE_SIZE*2 + 4,
+  y: TILE_SIZE*(MAP_H-3) - 28,
+  w: 18,
+  h: 22,
+  vx: 0,
+  vy: 0,
+  speed: 1.6,
+  sprintSpeed: 3.6,
+  onGround: false
+};
+
+// Input
+const keys = {w:false,a:false,s:false,d:false,space:false};
+let lastWTap = 0;
+let sprinting = false;
+
+window.addEventListener('keydown', e=>{
+  if(e.key==='w' || e.key==='W') handleWDown();
+  if(e.key==='a' || e.key==='A') keys.a=true;
+  if(e.key==='s' || e.key==='S') keys.s=true;
+  if(e.key==='d' || e.key==='D') keys.d=true;
+  if(e.key===' ') keys.space=true;
+});
+window.addEventListener('keyup', e=>{
+  if(e.key==='w' || e.key==='W') keys.w=false;
+  if(e.key==='a' || e.key==='A') keys.a=false;
+  if(e.key==='s' || e.key==='S') keys.s=false;
+  if(e.key==='d' || e.key==='D') keys.d=false;
+  if(e.key===' ') keys.space=false;
+});
+
+function handleWDown(){
+  const now = performance.now();
+  if(now - lastWTap < 250){
+    sprinting = true; // sprint window
+    setTimeout(()=> sprinting = false, 600); // lasts short time
+  }
+  lastWTap = now;
+  keys.w = true;
+}
+
+canvas.addEventListener('click', ()=> gridOn = !gridOn);
+
+// Physics
+const gravity = 0.9;
+const jumpStrength = -12.5;
+const friction = 0.85;
+
+function worldToTile(px,py){
+  return {tx: Math.floor(px/TILE_SIZE), ty: Math.floor(py/TILE_SIZE)};
+}
+function tileSolidAt(tx,ty){
+  if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) return true;
+  return map[idx(tx,ty)]===1;
+}
+
+function movePlayer(dt){
+  // Horizontal input
+  let targetSpeed = player.speed;
+  if(sprinting) targetSpeed = player.sprintSpeed;
+
+  let ax = 0;
+  if(keys.a) ax -= 1;
+  if(keys.d) ax += 1;
+  // Vertical walking (W/S move) - allow vertical when in air? We'll treat W/S as up/down for top-down movement too
+  if(keys.w) player.vy -= 0.5*dt; // small upward nudge in addition to jump
+  if(keys.s) player.vy += 0.5*dt;
+
+  // apply horizontal acceleration
+  player.vx += ax * targetSpeed * dt;
+  player.vx *= friction;
+
+  // gravity
+  player.vy += gravity * dt;
+
+  // jump
+  if(keys.space && player.onGround){ player.vy = jumpStrength; player.onGround = false; }
+
+  // integrate
+  let newX = player.x + player.vx * dt * 60;
+  let newY = player.y + player.vy * dt * 60;
+
+  // collision with tiles using AABB
+  // horizontal
+  if(!collidesAt(newX, player.y)){
+    player.x = newX;
+  }else{
+    // slide out
+    if(player.vx>0){
+      const tx = Math.floor((player.x + player.w) / TILE_SIZE);
+      player.x = tx * TILE_SIZE - player.w - 0.01;
+    }else if(player.vx<0){
+      const tx = Math.floor(player.x / TILE_SIZE);
+      player.x = (tx+1) * TILE_SIZE + 0.01;
+    }
+    player.vx = 0;
+  }
+
+  // vertical
+  if(!collidesAt(player.x, newY)){
+    player.y = newY;
+    player.onGround = false;
+  }else{
+    if(player.vy>0){
+      // landing on top of tile
+      const ty = Math.floor((player.y + player.h) / TILE_SIZE);
+      player.y = ty * TILE_SIZE - player.h - 0.01;
+      player.onGround = true;
+    }else if(player.vy<0){
+      const ty = Math.floor(player.y / TILE_SIZE);
+      player.y = (ty+1) * TILE_SIZE + 0.01;
+    }
+    player.vy = 0;
+  }
+
+  // keep inside world bounding box
+  if(player.x < 1) player.x = 1;
+  if(player.y < 1) player.y = 1;
+  if(player.x + player.w > WORLD_W - 1) player.x = WORLD_W - player.w - 1;
+  if(player.y + player.h > WORLD_H - 1) { player.y = WORLD_H - player.h - 1; player.onGround = true; player.vy = 0; }
+}
+
+function collidesAt(px, py){
+  // test four corners
+  const corners = [
+    {x:px, y:py},
+    {x:px+player.w, y:py},
+    {x:px, y:py+player.h},
+    {x:px+player.w, y:py+player.h}
+  ];
+  for(const c of corners){
+    const t = worldToTile(c.x, c.y);
+    if(tileSolidAt(t.tx, t.ty)) return true;
+  }
+  return false;
+}
+
+// Rendering
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // center camera on player
+  camera.x = player.x + player.w/2 - camera.w/2;
+  camera.y = player.y + player.h/2 - camera.h/2;
+  // clamp
+  camera.x = Math.max(0, Math.min(WORLD_W - camera.w, camera.x));
+  camera.y = Math.max(0, Math.min(WORLD_H - camera.h, camera.y));
+
+  // draw tiles visible
+  const startTx = Math.floor(camera.x / TILE_SIZE);
+  const startTy = Math.floor(camera.y / TILE_SIZE);
+  const endTx = Math.ceil((camera.x + camera.w) / TILE_SIZE);
+  const endTy = Math.ceil((camera.y + camera.h) / TILE_SIZE);
+
+  for(let y=startTy;y<endTy;y++){
+    for(let x=startTx;x<endTx;x++){
+      const tx = x*TILE_SIZE - camera.x;
+      const ty = y*TILE_SIZE - camera.y;
+      if(x<0||y<0||x>=MAP_W||y>=MAP_H) continue;
+      if(map[idx(x,y)]===1){
+        // tile
+        ctx.fillStyle = ((x+y)%2===0)?'#1a2b3f':'#20364a';
+        ctx.fillRect(tx,ty,TILE_SIZE,TILE_SIZE);
+      }else{
+        // floor
+        ctx.fillStyle = '#071122';
+        ctx.fillRect(tx,ty,TILE_SIZE,TILE_SIZE);
+      }
+      if(gridOn){
+        ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+        ctx.strokeRect(tx+0.5,ty+0.5,TILE_SIZE-1,TILE_SIZE-1);
+      }
+    }
+  }
+
+  // draw player
+  const px = player.x - camera.x;
+  const py = player.y - camera.y;
+  ctx.fillStyle = '#ffd166';
+  roundRect(ctx, px, py, player.w, player.h, 4);
+  ctx.fill();
+
+  // small shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillRect(px+2, py+player.h-4, player.w-4, 4);
+
+  // minimap
+  drawMiniMap();
+}
+
+function drawMiniMap(){
+  const mapW = 160, mapH = 100;
+  const sx = canvas.width - mapW - 12;
+  const sy = 12;
+  ctx.save();
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = 'rgba(5,12,22,0.8)';
+  roundRect(ctx, sx-6, sy-6, mapW+12, mapH+12, 8); ctx.fill();
+
+  // tiles
+  const scaleX = mapW / MAP_W;
+  const scaleY = mapH / MAP_H;
+  for(let y=0;y<MAP_H;y++){
+    for(let x=0;x<MAP_W;x++){
+      if(map[idx(x,y)]===1){
+        ctx.fillStyle = '#18324b';
+        ctx.fillRect(sx + x*scaleX, sy + y*scaleY, Math.ceil(scaleX), Math.ceil(scaleY));
+      }
+    }
+  }
+  // player in map
+  ctx.fillStyle = '#ffd166';
+  ctx.fillRect(sx + (player.x/WORLD_W)*mapW -2, sy + (player.y/WORLD_H)*mapH -2, 4, 4);
+  ctx.restore();
+}
+
+function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+// HUD update
+function updateHUD(){
+  const hud = document.getElementById('hud');
+  hud.textContent = `Pos: (${Math.round(player.x)}, ${Math.round(player.y)})  Vel: (${player.vx.toFixed(2)}, ${player.vy.toFixed(2)})  OnGround: ${player.onGround}  Sprint: ${sprinting}`;
+}
+
+// Reset button
+document.getElementById('resetBtn').addEventListener('click', ()=>{
+  player.x = TILE_SIZE*2 + 4;
+  player.y = TILE_SIZE*(MAP_H-3) - 28;
+  player.vx = player.vy = 0;
+});
+
+// Main loop
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(1/30, (now-last)/1000);
+  last = now;
+  movePlayer(dt);
+  draw();
+  updateHUD();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// handy debugging console draw for devs
+console.log('TileBox loaded — 40x25 tiles = 1000 tiles. Controls: WASD + SPACE (jump). Double-tap W to sprint. Click canvas to toggle grid.');
+</script>
+</body>
+</html>
